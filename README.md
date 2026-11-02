@@ -125,6 +125,8 @@ All versions use the same base image, tools, and tests. No extra build tools are
 
 Each image gets its upstream version tag, such as `:1.0.98`. Only the latest stable release also gets `:latest`. Building an old or pre-release version does not move `latest` back. A version tag may be rebuilt with a newer base image; use a digest to pin the full image. If a download, checksum, or test fails, that version is not pushed.
 
+After all version jobs finish, one last step publishes the stable image again. It updates only image metadata and tags, without building the CLI again. This keeps the GitHub Packages **Latest** badge on the stable release as well. The workflow checks that `latest` and the stable version tag have the same digest.
+
 Actions use fixed commit IDs. The workflow uses `GITHUB_TOKEN`; no personal token or Docker Hub secret is needed. The images include build records and a software bill of materials (SBOM). Tests run without a network, use fake app secrets, and check that a new container can read the saved secret. They also check the user, read-only root, and lack of npm and AI skill files. Test volumes are removed on exit. Real account login and live API calls are not part of these tests.
 
 If you copy this repo, enable Actions and allow it to write GitHub Packages. The image name will use your lower-case owner and repo name. A new GHCR package may be private at first; set it to Public in its package settings for pulls without login. GitHub may delay scheduled runs or pause them in an inactive repo.

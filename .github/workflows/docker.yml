@@ -176,3 +176,35 @@ jobs:
           push: true
           provenance: mode=max
           sbom: true
+
+  latest:
+    name: Keep latest on the stable release
+    needs: [plan, image]
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the stable image last
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          VERSION: ${{ needs.plan.outputs.latest }}
+        run: |
+          set -euo pipefail
+          created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.created=$created" \
+            --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" "$IMAGE:$VERSION"
+          stable_digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
+          latest_digest=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')
+          test "$stable_digest" = "$latest_digest"
+          echo "latest points to $VERSION ($latest_digest)" >> "$GITHUB_STEP_SUMMARY"
