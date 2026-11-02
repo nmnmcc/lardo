@@ -17,14 +17,14 @@ export LARK_IMAGE=ghcr.io/nmnmcc/lardo:latest
 docker compose pull
 
 # Open the URL from the command in your host browser to set up an app.
-docker compose run --rm --no-build lark config init --new
+docker compose run --rm lark config init --new
 
 # Open the next URL in your host browser to log in.
-docker compose run --rm --no-build lark auth login --recommend
+docker compose run --rm lark auth login --recommend
 
 # Each command uses the same saved app and login data.
-docker compose run --rm --no-build lark auth status
-docker compose run --rm --no-build lark calendar +agenda
+docker compose run --rm lark auth status
+docker compose run --rm lark calendar +agenda
 ```
 
 Keep `LARK_IMAGE` set in the same shell for later commands. Run `docker compose pull` again to update. You can use a version tag, such as `:1.0.98`, or an image digest instead of `:latest`.
