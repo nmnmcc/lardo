@@ -1,0 +1,178 @@
+name: Docker
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream version, such as 1.0.98. Leave blank to sync.'
+        type: string
+        required: false
+      backfill:
+        description: 'Build missing old versions, including pre-release versions.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      latest: ${{ steps.plan.outputs.latest }}
+      image: ${{ steps.plan.outputs.image }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Find latest release and missing historical image tags
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          BACKFILL: ${{ github.event_name != 'workflow_dispatch' || inputs.backfill }}
+          PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}"
+          latest_tag=$(gh api repos/larksuite/cli/releases/latest --jq .tag_name)
+          latest=${latest_tag#v}
+          gh api --paginate --slurp 'repos/larksuite/cli/releases?per_page=100' \
+            | jq '[.[][] | select(.draft == false)]' > releases.json
+          echo '[]' > existing.json
+          if [[ "$PUBLISH" == true && "$BACKFILL" == true && -z "$REQUESTED_VERSION" ]]; then
+            owner=${REPOSITORY%/*}
+            package=${REPOSITORY#*/}
+            namespace=users
+            if [[ "$OWNER_TYPE" == Organization ]]; then namespace=orgs; fi
+            if gh api --paginate --slurp \
+              "$namespace/$owner/packages/container/${package,,}/versions?per_page=100" \
+              > package-pages.json 2> package-error.txt; then
+              jq '[.[][] | .metadata.container.tags[]]' package-pages.json > existing.json
+            elif grep -q 'HTTP 404' package-error.txt; then
+              echo '[]' > existing.json
+            else
+              cat package-error.txt >&2
+              exit 1
+            fi
+          fi
+          requested=${REQUESTED_VERSION#v}
+          if [[ -n "$requested" ]]; then
+            [[ "$requested" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || exit 1
+          fi
+          jq -c --arg latest "$latest" --arg requested "$requested" \
+            --arg publish "$PUBLISH" --arg backfill "$BACKFILL" \
+            --slurpfile existing existing.json '
+            [.[] | (.tag_name | ltrimstr("v")) as $version
+              | select($version | test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"))
+              | select([.assets[].name] |
+                  index("checksums.txt") != null and
+                  index("lark-cli-\($version)-linux-amd64.tar.gz") != null and
+                  index("lark-cli-\($version)-linux-arm64.tar.gz") != null)
+              | select(if $requested != "" then $version == $requested
+                  elif $version == $latest then true
+                  else $publish == "true" and $backfill == "true" and
+                    ($existing[0] | index($version)) == null end)
+              | $version] | {version: .[:128]}' releases.json > matrix.json
+          count=$(jq '.version | length' matrix.json)
+          (( count > 0 && count <= 256 )) || { echo 'No usable releases, or matrix exceeds 256 versions.' >&2; exit 1; }
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Selected $count version(s): $(jq -r '.version | join(", ")' matrix.json)" >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build amd64 test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: CLI_VERSION=${{ matrix.version }}
+          tags: lardo:test-amd64
+          load: true
+          pull: true
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=min,scope=amd64
+      - name: Build arm64 test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: CLI_VERSION=${{ matrix.version }}
+          tags: lardo:test-arm64
+          load: true
+          pull: true
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=min,scope=arm64
+      - name: Verify both architectures, isolation and credential persistence
+        run: |
+          bash tests/smoke.sh lardo:test-amd64 linux/amd64
+          bash tests/smoke.sh lardo:test-arm64 linux/arm64
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        if: needs.plan.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Select image tags
+        id: tags
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          VERSION: ${{ matrix.version }}
+          LATEST: ${{ needs.plan.outputs.latest }}
+        run: |
+          {
+            echo 'value<<TAGS'
+            echo "$IMAGE:$VERSION"
+            if [[ "$VERSION" == "$LATEST" ]]; then echo "$IMAGE:latest"; fi
+            echo 'TAGS'
+          } >> "$GITHUB_OUTPUT"
+      - name: Publish tested multi-platform image
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: CLI_VERSION=${{ matrix.version }}
+          tags: ${{ steps.tags.outputs.value }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          push: true
+          provenance: mode=max
+          sbom: true

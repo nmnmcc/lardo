@@ -1,0 +1,21 @@
+services:
+  lark:
+    image: ${LARK_IMAGE:-lardo:local}
+    build:
+      context: .
+      args:
+        CLI_VERSION: ${CLI_VERSION:-1.0.98}
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    volumes:
+      - lark-data:/data
+
+volumes:
+  lark-data:
+    name: ${LARK_DATA_VOLUME:-lardo-data}
